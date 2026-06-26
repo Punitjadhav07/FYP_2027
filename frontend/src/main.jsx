@@ -35,6 +35,18 @@ function App() {
     refreshWorkspaces().catch(() => setError("Backend is not reachable yet."));
   }, []);
 
+  useEffect(() => {
+    if (!workspaceId) {
+      setMessages([]);
+      return;
+    }
+
+    api
+      .get(`/workspaces/${workspaceId}/messages`)
+      .then((response) => setMessages(response.data))
+      .catch(() => setError("Could not load this workspace conversation."));
+  }, [workspaceId]);
+
   async function createWorkspace(event) {
     event.preventDefault();
     setError("");
@@ -43,6 +55,7 @@ function App() {
       const response = await api.post("/workspaces", { name: workspaceName });
       await refreshWorkspaces();
       setWorkspaceId(response.data.id);
+      setMessages([]);
     } catch (err) {
       setError(err.response?.data?.detail || "Could not create workspace.");
     } finally {
@@ -64,6 +77,7 @@ function App() {
         {
           role: "system",
           text: `Indexed ${response.data.filename}: ${response.data.pages} pages, ${response.data.chunks} chunks.`,
+          sources: [],
         },
       ]);
       setFile(null);

@@ -5,10 +5,18 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.models import QueryRequest, QueryResponse, UploadResponse, Workspace, WorkspaceCreate
+from app.models import ChatMessage, QueryRequest, QueryResponse, UploadResponse, Workspace, WorkspaceCreate
 from app.pdf import chunk_page_text, extract_pdf_pages
 from app.rag import embed_texts, generate_answer, is_ambiguous_short_reply, retrieve_chunks
-from app.storage import append_chunks, create_workspace, get_workspace, list_workspaces, workspace_dir
+from app.storage import (
+    append_chunks,
+    append_message,
+    create_workspace,
+    get_workspace,
+    list_workspaces,
+    load_messages,
+    workspace_dir,
+)
 
 settings = get_settings()
 
@@ -36,6 +44,13 @@ def create_workspace_endpoint(payload: WorkspaceCreate) -> dict:
 @app.get("/workspaces", response_model=list[Workspace])
 def list_workspaces_endpoint() -> list[dict]:
     return list_workspaces()
+
+
+@app.get("/workspaces/{workspace_id}/messages", response_model=list[ChatMessage])
+def list_workspace_messages(workspace_id: str) -> list[dict]:
+    if not get_workspace(workspace_id):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return load_messages(workspace_id)
 
 
 @app.post("/workspaces/{workspace_id}/documents", response_model=UploadResponse)
@@ -75,6 +90,11 @@ async def upload_document(workspace_id: str, file: UploadFile = File(...)) -> di
         record["embedding"] = embedding
 
     append_chunks(workspace_id, records)
+    append_message(
+        workspace_id,
+        "system",
+        f"Indexed {file.filename}: {len(pages)} pages, {len(records)} chunks.",
+    )
     return {
         "document_id": document_id,
         "filename": file.filename,
@@ -95,11 +115,14 @@ def query_workspace(workspace_id: str, payload: QueryRequest) -> dict:
         raise HTTPException(status_code=400, detail="Upload at least one PDF before asking questions")
 
     if is_ambiguous_short_reply(payload.question):
+        answer = (
+            "Please ask a complete question about the uploaded paper, for example: "
+            "'What is the paper about?' or 'Summarize the main contributions.'"
+        )
+        append_message(workspace_id, "user", payload.question)
+        append_message(workspace_id, "assistant", answer)
         return {
-            "answer": (
-                "Please ask a complete question about the uploaded paper, for example: "
-                "'What is the paper about?' or 'Summarize the main contributions.'"
-            ),
+            "answer": answer,
             "sources": [],
         }
 
@@ -116,4 +139,6 @@ def query_workspace(workspace_id: str, payload: QueryRequest) -> dict:
         }
         for chunk in top_chunks
     ]
+    append_message(workspace_id, "user", payload.question)
+    append_message(workspace_id, "assistant", answer, sources)
     return {"answer": answer, "sources": sources}

@@ -10,6 +10,7 @@ This repository currently contains the MVP for:
 - Basic retrieval-based Q&A
 - Source snippets with page references
 - Summary-style questions such as `brief me about this paper`
+- Per-workspace conversation history saved locally
 - Local fallback mode when no OpenAI key is configured
 
 ## Project Structure
@@ -122,6 +123,7 @@ docs/update-prd
 - Extract text using PyMuPDF
 - Chunk text into searchable passages
 - Store indexed chunks locally under ignored backend storage
+- Save each workspace conversation locally
 - Ask questions about uploaded PDFs
 - View retrieved source snippets and page numbers
 - Ask summary prompts like:

@@ -30,6 +30,14 @@ class QueryResponse(BaseModel):
     sources: list[Source]
 
 
+class ChatMessage(BaseModel):
+    id: str
+    role: str
+    text: str
+    sources: list[Source] = []
+    created_at: str
+
+
 class UploadResponse(BaseModel):
     document_id: str
     filename: str
