@@ -11,10 +11,12 @@ class PageText:
     text: str
 
 
-def extract_pdf_pages(path: Path) -> list[PageText]:
+def extract_pdf_pages(path: Path, max_pages: int | None = None) -> list[PageText]:
     pages: list[PageText] = []
     with fitz.open(path) as document:
         for index, page in enumerate(document, start=1):
+            if max_pages is not None and index > max_pages:
+                break
             text = normalize_text(page.get_text("text"))
             if text:
                 pages.append(PageText(page=index, text=text))

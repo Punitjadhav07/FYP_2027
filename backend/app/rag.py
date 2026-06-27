@@ -1,13 +1,15 @@
 import hashlib
+import logging
 import math
 import re
 from typing import Iterable
 
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from app.config import Settings
 
 LOCAL_EMBEDDING_DIMENSIONS = 512
+logger = logging.getLogger(__name__)
 
 
 def client(settings: Settings) -> OpenAI:
@@ -20,11 +22,15 @@ def embed_texts(settings: Settings, texts: list[str]) -> list[list[float]]:
     if not settings.openai_api_key:
         return [local_embedding(text) for text in texts]
 
-    response = client(settings).embeddings.create(
-        model=settings.openai_embedding_model,
-        input=texts,
-    )
-    return [item.embedding for item in response.data]
+    try:
+        response = client(settings).embeddings.create(
+            model=settings.openai_embedding_model,
+            input=texts,
+        )
+        return [item.embedding for item in response.data]
+    except OpenAIError as exc:
+        logger.warning("OpenAI embeddings failed; using local fallback embeddings: %s", exc.__class__.__name__)
+        return [local_embedding(text) for text in texts]
 
 
 def tokenize(text: str) -> list[str]:
@@ -176,15 +182,19 @@ def generate_answer(settings: Settings, question: str, chunks: list[dict]) -> st
     )
     user = f"Context:\n{context}\n\nQuestion: {question}"
 
-    response = client(settings).chat.completions.create(
-        model=settings.openai_chat_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-    )
-    return response.choices[0].message.content or ""
+    try:
+        response = client(settings).chat.completions.create(
+            model=settings.openai_chat_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or ""
+    except OpenAIError as exc:
+        logger.warning("OpenAI answer generation failed; using extractive fallback answer: %s", exc.__class__.__name__)
+        return generate_extract_answer(question, chunks)
 
 
 def generate_extract_answer(question: str, chunks: list[dict]) -> str:

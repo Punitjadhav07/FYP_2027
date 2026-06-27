@@ -12,30 +12,47 @@ def slugify(value: str) -> str:
     return cleaned or "workspace"
 
 
+def validate_workspace_id(workspace_id: str) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,90}-[a-f0-9]{8}", workspace_id):
+        raise ValueError("Invalid workspace id")
+    return workspace_id
+
+
+def workspace_path(workspace_id: str) -> Path:
+    settings = get_settings()
+    workspace_id = validate_workspace_id(workspace_id)
+    root = (settings.storage_dir / "workspaces").resolve()
+    path = (root / workspace_id).resolve()
+    if root != path and root not in path.parents:
+        raise ValueError("Invalid workspace path")
+    return path
+
+
 def workspace_dir(workspace_id: str) -> Path:
-    path = get_settings().storage_dir / "workspaces" / workspace_id
+    path = workspace_path(workspace_id)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def workspace_meta_path(workspace_id: str) -> Path:
-    return workspace_dir(workspace_id) / "workspace.json"
+    return workspace_path(workspace_id) / "workspace.json"
 
 
 def chunks_path(workspace_id: str) -> Path:
-    return workspace_dir(workspace_id) / "chunks.json"
+    return workspace_path(workspace_id) / "chunks.json"
 
 
 def messages_path(workspace_id: str) -> Path:
-    return workspace_dir(workspace_id) / "messages.json"
+    return workspace_path(workspace_id) / "messages.json"
 
 
 def create_workspace(name: str) -> dict:
     workspace_id = f"{slugify(name)}-{uuid4().hex[:8]}"
     meta = {"id": workspace_id, "name": name}
-    workspace_meta_path(workspace_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    chunks_path(workspace_id).write_text("[]", encoding="utf-8")
-    messages_path(workspace_id).write_text("[]", encoding="utf-8")
+    path = workspace_dir(workspace_id)
+    (path / "workspace.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (path / "chunks.json").write_text("[]", encoding="utf-8")
+    (path / "messages.json").write_text("[]", encoding="utf-8")
     return meta
 
 
@@ -54,7 +71,10 @@ def list_workspaces() -> list[dict]:
 
 
 def get_workspace(workspace_id: str) -> dict | None:
-    path = workspace_meta_path(workspace_id)
+    try:
+        path = workspace_meta_path(workspace_id)
+    except ValueError:
+        return None
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
