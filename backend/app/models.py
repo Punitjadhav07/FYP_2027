@@ -19,10 +19,50 @@ class Workspace(BaseModel):
     document_count: int = 0
 
 
+class WorkspaceStats(BaseModel):
+    id: str
+    name: str
+    document_count: int
+    chunk_count: int
+    approx_tokens: int
+
+
+class UserPublic(BaseModel):
+    id: str
+    email: str
+    name: str
+
+
+class AuthRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=120)
+    password: str = Field(min_length=6, max_length=128)
+    name: str | None = Field(default=None, max_length=80)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if "@" not in cleaned:
+            raise ValueError("Enter a valid email")
+        return cleaned
+
+    @field_validator("name")
+    @classmethod
+    def normalize_optional_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        return cleaned or None
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserPublic
+
+
 class WorkspaceMergeRequest(BaseModel):
     workspace_ids: list[str] = Field(min_length=2, max_length=6)
     name: str | None = Field(default=None, min_length=1, max_length=80)
-    total_chunk_budget: int = Field(default=80, ge=10, le=300)
 
     @field_validator("workspace_ids")
     @classmethod
@@ -57,9 +97,32 @@ class Source(BaseModel):
     text: str
 
 
+class Citation(BaseModel):
+    label: str
+    document_id: str
+    filename: str
+    page: int
+    chunk_id: str
+    score: float
+    text: str
+    citation: str
+
+
 class QueryResponse(BaseModel):
     answer: str
     sources: list[Source]
+    citations: list[Citation] = Field(default_factory=list)
+
+
+class SummaryRequest(BaseModel):
+    focus: str | None = Field(default=None, max_length=240)
+    top_k: int = Field(default=8, ge=4, le=12)
+
+
+class SummaryResponse(BaseModel):
+    summary: str
+    sources: list[Source]
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):
@@ -67,6 +130,7 @@ class ChatMessage(BaseModel):
     role: str
     text: str
     sources: list[Source] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
     created_at: str
 
 
@@ -84,6 +148,10 @@ class AppConfig(BaseModel):
     max_upload_mb: int
     max_pdf_pages: int
     max_chunks_per_document: int
+    default_query_sources: int
+    default_summary_sources: int
+    default_merge_chunk_budget: int
+    google_enabled: bool
     llm_enabled: bool
 
 

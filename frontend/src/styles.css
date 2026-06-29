@@ -85,6 +85,58 @@ select:focus {
   overflow: hidden;
 }
 
+.auth-shell {
+  align-items: center;
+  background:
+    radial-gradient(circle at top left, rgba(56, 161, 147, 0.16), transparent 34%),
+    var(--bg);
+  display: grid;
+  min-height: 100vh;
+  padding: 24px;
+  place-items: center;
+}
+
+.auth-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 18px;
+  max-width: 440px;
+  padding: 28px;
+  width: 100%;
+}
+
+.auth-card h1 {
+  margin: 0;
+}
+
+.auth-card p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 0;
+}
+
+.auth-form {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-error {
+  border: 1px solid rgba(232, 86, 86, 0.35);
+  border-radius: 8px;
+}
+
+.ghost-button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.ghost-button:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+
 .sidebar {
   background: var(--panel);
   border-right: 1px solid var(--border);
@@ -93,6 +145,31 @@ select:focus {
   gap: 18px;
   overflow: auto;
   padding: 28px;
+}
+
+.user-panel {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.user-panel span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.user-panel small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-panel button {
+  margin-top: 6px;
+  min-height: 36px;
 }
 
 .sidebar h1,
@@ -214,6 +291,29 @@ select:focus {
   color: var(--danger);
 }
 
+.nav-tabs {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 6px;
+}
+
+.nav-tabs button {
+  background: transparent;
+  color: var(--muted);
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.nav-tabs button.active,
+.nav-tabs button:hover:not(:disabled) {
+  background: rgba(56, 161, 147, 0.16);
+  color: var(--text-strong);
+}
+
 .row {
   display: grid;
   gap: 8px;
@@ -296,6 +396,10 @@ select:focus {
   padding: 26px;
 }
 
+.dashboard-messages {
+  align-items: stretch;
+}
+
 .dashboard {
   display: grid;
   gap: 14px;
@@ -347,6 +451,136 @@ select:focus {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.control-panel {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.memory-control {
+  grid-column: span 3;
+}
+
+.control-heading {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 24px 1fr;
+}
+
+.control-heading svg {
+  color: var(--accent-strong);
+  margin-top: 2px;
+}
+
+.control-heading h3 {
+  margin: 0 0 4px;
+}
+
+.control-heading p,
+.control-panel p {
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.merge-dashboard-form {
+  display: grid;
+  gap: 12px;
+}
+
+.session-control-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 230px;
+  overflow: auto;
+}
+
+.session-control-item {
+  align-items: center;
+  background: rgba(13, 17, 23, 0.38);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 18px 1fr;
+  min-height: 58px;
+  padding: 10px;
+}
+
+.session-control-item input {
+  accent-color: var(--accent);
+  height: 16px;
+  margin: 0;
+  min-height: 16px;
+  padding: 0;
+  width: 16px;
+}
+
+.session-control-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.session-control-item strong {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-control-item small {
+  color: var(--muted);
+}
+
+.feature-control-row strong {
+  color: var(--accent-strong);
+  text-align: right;
+}
+
+.memory-stats {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.memory-stats span,
+.feature-control-row {
+  background: rgba(13, 17, 23, 0.38);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+  padding: 9px 10px;
+}
+
+.feature-control-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.policy-note {
+  background: rgba(56, 161, 147, 0.08);
+  border: 1px solid rgba(56, 161, 147, 0.22);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
+.compact-info .insight {
+  min-height: 150px;
 }
 
 .insight {
@@ -434,10 +668,82 @@ select:focus {
   padding-top: 12px;
 }
 
+.evidence {
+  background: rgba(56, 161, 147, 0.08);
+  border: 1px solid rgba(56, 161, 147, 0.22);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.evidence-header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.evidence-header strong,
+.sources > strong {
+  color: var(--accent-strong);
+  font-size: 0.86rem;
+  text-transform: uppercase;
+}
+
+.evidence-header span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.citation-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+}
+
+.citation-list li {
+  align-items: start;
+  background: rgba(13, 17, 23, 0.44);
+  border: 1px solid rgba(102, 214, 200, 0.14);
+  border-radius: 8px;
+  color: #c8d3df;
+  display: grid;
+  font-size: 0.9rem;
+  gap: 9px;
+  grid-template-columns: 42px 1fr;
+  list-style: none;
+  padding: 9px 10px;
+}
+
+.citation-list li > span {
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+.citation-list li div {
+  display: grid;
+  gap: 2px;
+}
+
+.citation-list li strong {
+  color: var(--text);
+}
+
+.citation-list li small {
+  color: var(--muted);
+}
+
 .sources summary {
   color: var(--accent-strong);
   cursor: pointer;
   font-weight: 700;
+}
+
+.sources > strong {
+  color: var(--muted);
 }
 
 .sources details p {
@@ -495,6 +801,16 @@ select:focus {
 
   .metric-row,
   .insight-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-control {
+    grid-column: span 1;
+  }
+
+  .session-control-list,
+  .memory-stats,
+  .memory-stats {
     grid-template-columns: 1fr;
   }
 

@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -11,25 +11,46 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.models import (
     AppConfig,
+    AuthRequest,
+    AuthResponse,
     ChatMessage,
     HealthResponse,
     QueryRequest,
     QueryResponse,
+    SummaryRequest,
+    SummaryResponse,
     UploadResponse,
     Workspace,
     WorkspaceCreate,
     WorkspaceMergeRequest,
+    WorkspaceStats,
 )
 from app.pdf import chunk_page_text, extract_pdf_pages
-from app.rag import embed_texts, generate_answer, is_ambiguous_short_reply, retrieve_chunks
+from app.rag import (
+    asks_current_date,
+    embed_texts,
+    generate_answer,
+    generate_current_date_answer,
+    generate_summary,
+    has_enough_evidence,
+    is_ambiguous_short_reply,
+    retrieve_chunks,
+    retrieve_summary_chunks,
+)
 from app.storage import (
     append_chunks,
     append_message,
+    authenticate_user,
     create_workspace,
+    create_session,
+    create_user,
     get_workspace,
+    get_session_user,
+    get_user_workspace,
     load_chunks,
     list_workspaces,
     load_messages,
+    public_user,
     workspace_dir,
 )
 
@@ -88,32 +109,92 @@ def public_config() -> dict:
         "max_upload_mb": settings.max_upload_mb,
         "max_pdf_pages": settings.max_pdf_pages,
         "max_chunks_per_document": settings.max_chunks_per_document,
+        "default_query_sources": settings.default_query_sources,
+        "default_summary_sources": settings.default_summary_sources,
+        "default_merge_chunk_budget": settings.default_merge_chunk_budget,
+        "google_enabled": bool(settings.google_client_id),
         "llm_enabled": bool(settings.openai_api_key),
     }
 
 
+def current_user(authorization: str = Header(default="")) -> dict:
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    user = get_session_user(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    return user
+
+
+@app.post("/auth/signup", response_model=AuthResponse)
+def signup(payload: AuthRequest) -> dict:
+    try:
+        user = create_user(payload.email, payload.password, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    create_workspace("Literature Review", user["id"])
+    token = create_session(user["id"])
+    return {"token": token, "user": public_user(user)}
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(payload: AuthRequest) -> dict:
+    user = authenticate_user(payload.email, payload.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_session(user["id"])
+    return {"token": token, "user": public_user(user)}
+
+
+@app.get("/auth/me")
+def me(user: dict = Depends(current_user)) -> dict:
+    return public_user(user)
+
+
 @app.post("/workspaces", response_model=Workspace)
-def create_workspace_endpoint(payload: WorkspaceCreate) -> dict:
-    return {**create_workspace(payload.name), "document_count": 0}
+def create_workspace_endpoint(payload: WorkspaceCreate, user: dict = Depends(current_user)) -> dict:
+    return {**create_workspace(payload.name, user["id"]), "document_count": 0}
 
 
 @app.get("/workspaces", response_model=list[Workspace])
-def list_workspaces_endpoint() -> list[dict]:
-    return list_workspaces()
+def list_workspaces_endpoint(user: dict = Depends(current_user)) -> list[dict]:
+    return list_workspaces(user["id"])
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, round(len(text.split()) * 1.3))
+
+
+def workspace_stats(workspace: dict) -> dict:
+    chunks = load_chunks(workspace["id"])
+    docs = {chunk["document_id"] for chunk in chunks}
+    return {
+        "id": workspace["id"],
+        "name": workspace["name"],
+        "document_count": len(docs),
+        "chunk_count": len(chunks),
+        "approx_tokens": sum(estimate_tokens(chunk.get("text", "")) for chunk in chunks),
+    }
+
+
+@app.get("/workspaces/stats", response_model=list[WorkspaceStats])
+def list_workspace_stats(user: dict = Depends(current_user)) -> list[dict]:
+    return [workspace_stats(workspace) for workspace in list_workspaces(user["id"])]
 
 
 @app.post("/workspaces/merge", response_model=Workspace)
-def merge_workspaces(payload: WorkspaceMergeRequest) -> dict:
+def merge_workspaces(payload: WorkspaceMergeRequest, user: dict = Depends(current_user)) -> dict:
     source_workspaces = []
     for workspace_id in payload.workspace_ids:
-        workspace = get_workspace(workspace_id)
+        workspace = get_user_workspace(workspace_id, user["id"])
         if not workspace:
             raise HTTPException(status_code=404, detail=f"Workspace not found: {workspace_id}")
         source_workspaces.append(workspace)
 
     merged_name = payload.name or "Merged: " + " + ".join(workspace["name"] for workspace in source_workspaces)
-    merged = create_workspace(merged_name[:80])
-    per_workspace_budget = max(1, payload.total_chunk_budget // len(source_workspaces))
+    merged = create_workspace(merged_name[:80], user["id"])
+    per_workspace_budget = max(1, settings.default_merge_chunk_budget // len(source_workspaces))
     merged_records: list[dict] = []
     merge_document_id = uuid4().hex
 
@@ -147,15 +228,50 @@ def merge_workspaces(payload: WorkspaceMergeRequest) -> dict:
 
 
 @app.get("/workspaces/{workspace_id}/messages", response_model=list[ChatMessage])
-def list_workspace_messages(workspace_id: str) -> list[dict]:
-    if not get_workspace(workspace_id):
+def list_workspace_messages(workspace_id: str, user: dict = Depends(current_user)) -> list[dict]:
+    if not get_user_workspace(workspace_id, user["id"]):
         raise HTTPException(status_code=404, detail="Workspace not found")
     return load_messages(workspace_id)
 
 
+def response_sources(chunks: list[dict]) -> list[dict]:
+    return [
+        {
+            "document_id": chunk["document_id"],
+            "filename": chunk["filename"],
+            "page": chunk["page"],
+            "chunk_id": chunk["chunk_id"],
+            "score": round(float(chunk["score"]), 4),
+            "text": chunk["text"],
+        }
+        for chunk in chunks
+    ]
+
+
+def response_citations(chunks: list[dict]) -> list[dict]:
+    citations = []
+    for index, chunk in enumerate(chunks, start=1):
+        score = round(float(chunk["score"]), 4)
+        filename = chunk["filename"]
+        page = int(chunk["page"])
+        citations.append(
+            {
+                "label": f"S{index}",
+                "document_id": chunk["document_id"],
+                "filename": filename,
+                "page": page,
+                "chunk_id": chunk["chunk_id"],
+                "score": score,
+                "text": chunk["text"],
+                "citation": f"{filename}, p. {page} (retrieval score {score:.3f})",
+            }
+        )
+    return citations
+
+
 @app.post("/workspaces/{workspace_id}/documents", response_model=UploadResponse)
-async def upload_document(workspace_id: str, file: UploadFile = File(...)) -> dict:
-    if not get_workspace(workspace_id):
+async def upload_document(workspace_id: str, file: UploadFile = File(...), user: dict = Depends(current_user)) -> dict:
+    if not get_user_workspace(workspace_id, user["id"]):
         raise HTTPException(status_code=404, detail="Workspace not found")
     filename = Path(file.filename or "document.pdf").name
     if len(filename) > 180:
@@ -197,7 +313,9 @@ async def upload_document(workspace_id: str, file: UploadFile = File(...)) -> di
     records: list[dict] = []
     texts: list[str] = []
     for page in pages:
-        for chunk_index, text in enumerate(chunk_page_text(page)):
+        for chunk_index, text in enumerate(
+            chunk_page_text(page, max_words=settings.chunk_max_words, overlap_words=settings.chunk_overlap_words)
+        ):
             if len(records) >= settings.max_chunks_per_document:
                 break
             records.append(
@@ -240,9 +358,19 @@ async def upload_document(workspace_id: str, file: UploadFile = File(...)) -> di
 
 
 @app.post("/workspaces/{workspace_id}/query", response_model=QueryResponse)
-def query_workspace(workspace_id: str, payload: QueryRequest) -> dict:
-    if not get_workspace(workspace_id):
+def query_workspace(workspace_id: str, payload: QueryRequest, user: dict = Depends(current_user)) -> dict:
+    if not get_user_workspace(workspace_id, user["id"]):
         raise HTTPException(status_code=404, detail="Workspace not found")
+
+    if asks_current_date(payload.question):
+        answer = generate_current_date_answer()
+        append_message(workspace_id, "user", payload.question)
+        append_message(workspace_id, "assistant", answer)
+        return {
+            "answer": answer,
+            "sources": [],
+            "citations": [],
+        }
 
     chunks = load_chunks(workspace_id)
     if not chunks:
@@ -258,26 +386,54 @@ def query_workspace(workspace_id: str, payload: QueryRequest) -> dict:
         return {
             "answer": answer,
             "sources": [],
+            "citations": [],
         }
 
     try:
-        top_chunks = retrieve_chunks(settings, chunks, payload.question, payload.top_k)
+        top_k = min(payload.top_k, settings.default_query_sources)
+        top_chunks = retrieve_chunks(settings, chunks, payload.question, top_k)
+        if not has_enough_evidence(payload.question, top_chunks):
+            answer = (
+                "I could not find enough relevant evidence in the uploaded PDFs to answer that. "
+                "Try naming the paper, author, section, or topic more specifically."
+            )
+            append_message(workspace_id, "user", payload.question)
+            append_message(workspace_id, "assistant", answer)
+            return {"answer": answer, "sources": [], "citations": []}
         answer = generate_answer(settings, payload.question, top_chunks)
     except Exception as exc:
         logger.exception("Query failed for workspace %s", workspace_id)
         raise HTTPException(status_code=502, detail="Could not generate an answer right now") from exc
 
-    sources = [
-        {
-            "document_id": chunk["document_id"],
-            "filename": chunk["filename"],
-            "page": chunk["page"],
-            "chunk_id": chunk["chunk_id"],
-            "score": round(float(chunk["score"]), 4),
-            "text": chunk["text"],
-        }
-        for chunk in top_chunks
-    ]
+    sources = response_sources(top_chunks)
+    citations = response_citations(top_chunks)
     append_message(workspace_id, "user", payload.question)
-    append_message(workspace_id, "assistant", answer, sources)
-    return {"answer": answer, "sources": sources}
+    append_message(workspace_id, "assistant", answer, sources, citations)
+    return {"answer": answer, "sources": sources, "citations": citations}
+
+
+@app.post("/workspaces/{workspace_id}/summarize", response_model=SummaryResponse)
+def summarize_workspace(workspace_id: str, payload: SummaryRequest, user: dict = Depends(current_user)) -> dict:
+    if not get_user_workspace(workspace_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    chunks = load_chunks(workspace_id)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Upload at least one PDF before summarizing")
+
+    top_k = min(payload.top_k, settings.default_summary_sources)
+    top_chunks = retrieve_summary_chunks(chunks, top_k)
+    try:
+        summary = generate_summary(settings, top_chunks, payload.focus)
+    except Exception as exc:
+        logger.exception("Summary failed for workspace %s", workspace_id)
+        raise HTTPException(status_code=502, detail="Could not generate a summary right now") from exc
+
+    sources = response_sources(top_chunks)
+    citations = response_citations(top_chunks)
+    user_prompt = "Summarize this workspace"
+    if payload.focus:
+        user_prompt = f"Summarize this workspace focusing on: {payload.focus}"
+    append_message(workspace_id, "user", user_prompt)
+    append_message(workspace_id, "assistant", summary, sources, citations)
+    return {"summary": summary, "sources": sources, "citations": citations}

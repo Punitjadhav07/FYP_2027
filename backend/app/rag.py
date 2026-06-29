@@ -2,6 +2,7 @@ import hashlib
 import logging
 import math
 import re
+from datetime import datetime
 from typing import Iterable
 
 from openai import OpenAI, OpenAIError
@@ -36,9 +37,17 @@ def embed_texts(settings: Settings, texts: list[str]) -> list[list[float]]:
 def tokenize(text: str) -> list[str]:
     stopwords = {
         "what",
+        "who",
+        "how",
         "which",
         "when",
         "where",
+        "the",
+        "was",
+        "were",
+        "are",
+        "does",
+        "did",
         "this",
         "that",
         "with",
@@ -89,11 +98,41 @@ def retrieve_chunks(settings: Settings, chunks: list[dict], question: str, top_k
     query_embedding = embed_texts(settings, [question])[0]
     question_terms = set(tokenize(question))
     asks_definition = question.lower().strip().startswith(("what is", "define", "what are"))
+    asks_authors = asks_for_authors(question)
+    asks_trend = asks_for_trend(question)
     ranked = [
-        {**chunk, "score": retrieval_score(query_embedding, question_terms, chunk, asks_definition)}
+        {
+            **chunk,
+            "score": retrieval_score(
+                query_embedding,
+                question_terms,
+                chunk,
+                asks_definition,
+                asks_authors,
+                asks_trend,
+            ),
+        }
         for chunk in chunks
     ]
-    return sorted(ranked, key=lambda item: item["score"], reverse=True)[:top_k]
+    ranked = sorted(ranked, key=lambda item: item["score"], reverse=True)
+    if asks_authors:
+        author_ranked = [chunk for chunk in ranked if extract_author_candidates(chunk["text"])]
+        return (author_ranked or ranked)[:1]
+    return ranked[:top_k]
+
+
+def asks_current_date(question: str) -> bool:
+    text = re.sub(r"\s+", " ", question.lower()).strip()
+    return bool(
+        re.search(r"\b(today'?s|current)\s+date\b", text)
+        or re.search(r"\bwhat\s+(is|'s)\s+the\s+date\b", text)
+        or text in {"date", "today date", "todays date", "today's date"}
+    )
+
+
+def generate_current_date_answer() -> str:
+    today = datetime.now().astimezone().date()
+    return f"Today's date is {today.strftime('%B')} {today.day}, {today.year}."
 
 
 def asks_for_summary(question: str) -> bool:
@@ -116,6 +155,16 @@ def asks_for_summary(question: str) -> bool:
     )
 
 
+def asks_for_authors(question: str) -> bool:
+    text = question.lower()
+    return any(term in text for term in ("author", "authors", "written by", "who wrote"))
+
+
+def asks_for_trend(question: str) -> bool:
+    terms = set(tokenize(question))
+    return bool({"evolving", "evolution", "changing", "trend", "trends", "future", "emerging"}.intersection(terms))
+
+
 def retrieve_summary_chunks(chunks: list[dict], top_k: int) -> list[dict]:
     ranked = sorted(
         ({**chunk, "score": summary_chunk_score(chunk)} for chunk in chunks),
@@ -123,6 +172,41 @@ def retrieve_summary_chunks(chunks: list[dict], top_k: int) -> list[dict]:
         reverse=True,
     )
     return ranked[: max(top_k, 6)]
+
+
+def generate_summary(settings: Settings, chunks: list[dict], focus: str | None = None) -> str:
+    if not chunks:
+        return "The uploaded papers do not provide enough readable text to summarize."
+
+    if not settings.openai_api_key:
+        return generate_extract_summary(chunks, focus)
+
+    context = "\n\n".join(
+        f"Source {index}: {chunk['filename']} page {chunk['page']}\n{chunk['text']}"
+        for index, chunk in enumerate(chunks, start=1)
+    )
+    focus_line = f"Focus the summary on: {focus}." if focus else "Provide a balanced research summary."
+    system = (
+        "You summarize academic papers using only the provided source excerpts. "
+        "Write a concise structured summary with these sections: Overview, Key contributions, "
+        "Methods or evidence, Limitations or open questions. Cite every major claim inline "
+        "with source labels like [S1]. If the excerpts do not support a section, say so."
+    )
+    user = f"{focus_line}\n\nSource excerpts:\n{context}"
+
+    try:
+        response = client(settings).chat.completions.create(
+            model=settings.openai_chat_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.2,
+        )
+        return normalize_source_labels(response.choices[0].message.content or "")
+    except OpenAIError as exc:
+        logger.warning("OpenAI summary generation failed; using extractive fallback summary: %s", exc.__class__.__name__)
+        return generate_extract_summary(chunks, focus)
 
 
 def summary_chunk_score(chunk: dict) -> float:
@@ -150,6 +234,8 @@ def retrieval_score(
     question_terms: set[str],
     chunk: dict,
     asks_definition: bool,
+    asks_authors: bool = False,
+    asks_trend: bool = False,
 ) -> float:
     semantic_score = cosine_similarity(query_embedding, chunk["embedding"])
     chunk_terms = set(tokenize(chunk["text"]))
@@ -158,27 +244,61 @@ def retrieval_score(
 
     overlap = len(question_terms.intersection(chunk_terms)) / len(question_terms)
     text_lower = chunk["text"].lower()
+    filename_terms = set(tokenize(chunk.get("filename", "")))
+    filename_bonus = 0.35 * (len(question_terms.intersection(filename_terms)) / len(question_terms))
     phrase_bonus = 0.12 if "hallucination in natural language generation" in text_lower else 0.0
     definition_bonus = 0.0
     if {"definition", "definitions", "defines", "defined", "referring"}.intersection(chunk_terms):
         definition_bonus = 0.3 if asks_definition else 0.1
+    author_bonus = 0.0
+    if asks_authors:
+        page = int(chunk.get("page", 99))
+        has_author_marker = bool(extract_author_candidates(chunk["text"]))
+        if page == 1:
+            author_bonus += 2.0
+        if "abstract" in text_lower:
+            author_bonus += 0.6
+        if has_author_marker:
+            author_bonus += 3.0
+    trend_bonus = 0.0
+    if asks_trend:
+        page = int(chunk.get("page", 99))
+        if page <= 2:
+            trend_bonus += 0.8
+        if any(term in text_lower for term in ("moving from", "shift", "transition", "emerging", "future")):
+            trend_bonus += 1.0
     reference_penalty = 0.12 if "acm reference format" in text_lower or "ccs concepts" in text_lower else 0.0
-    return (0.55 * semantic_score) + (0.45 * overlap) + phrase_bonus + definition_bonus - reference_penalty
+    return (
+        (0.5 * semantic_score)
+        + (0.35 * overlap)
+        + filename_bonus
+        + phrase_bonus
+        + definition_bonus
+        + author_bonus
+        + trend_bonus
+        - reference_penalty
+    )
 
 
 def generate_answer(settings: Settings, question: str, chunks: list[dict]) -> str:
+    if asks_current_date(question):
+        return generate_current_date_answer()
+
+    if asks_for_authors(question):
+        return generate_author_answer(chunks)
+
     if not settings.openai_api_key:
         return generate_extract_answer(question, chunks)
 
     context = "\n\n".join(
-        f"Source {index}: {chunk['filename']} page {chunk['page']}\n{chunk['text']}"
+        f"S{index}: {chunk['filename']} page {chunk['page']}\n{chunk['text']}"
         for index, chunk in enumerate(chunks, start=1)
     )
     system = (
         "You are a careful academic research assistant. Answer only from the provided "
         "context. If the context does not contain the answer, say that the uploaded "
         "papers do not provide enough information. Keep the answer clear and cite "
-        "source numbers inline like [Source 1]."
+        "source numbers inline like [S1]."
     )
     user = f"Context:\n{context}\n\nQuestion: {question}"
 
@@ -191,7 +311,7 @@ def generate_answer(settings: Settings, question: str, chunks: list[dict]) -> st
             ],
             temperature=0.2,
         )
-        return response.choices[0].message.content or ""
+        return normalize_source_labels(response.choices[0].message.content or "")
     except OpenAIError as exc:
         logger.warning("OpenAI answer generation failed; using extractive fallback answer: %s", exc.__class__.__name__)
         return generate_extract_answer(question, chunks)
@@ -207,16 +327,25 @@ def generate_extract_answer(question: str, chunks: list[dict]) -> str:
             "'What is the paper about?' or 'Summarize the main contributions.'"
         )
 
+    if asks_current_date(question):
+        return generate_current_date_answer()
+
     if asks_for_summary(question):
         return generate_extract_summary(chunks)
 
+    if asks_for_authors(question):
+        return generate_author_answer(chunks)
+
     question_terms = set(tokenize(question))
     asks_definition = question.lower().strip().startswith(("what is", "define", "what are"))
+    asks_trend = asks_for_trend(question)
     sentences: list[tuple[int, str, str]] = []
     for index, chunk in enumerate(chunks, start=1):
         for sentence in re.split(r"(?<=[.!?])\s+", chunk["text"]):
             cleaned = sentence.strip()
             if len(cleaned) < 40:
+                continue
+            if cleaned.lower().startswith(("keywords:", "index terms:", "ccs concepts:", "additional key words")):
                 continue
             sentence_terms = set(tokenize(cleaned))
             overlap = len(question_terms.intersection(sentence_terms))
@@ -230,8 +359,14 @@ def generate_extract_answer(question: str, chunks: list[dict]) -> str:
                 "nonsensical",
             }.intersection(sentence_terms):
                 definition_bonus = 5
+            trend_bonus = 0
+            if asks_trend and any(
+                term in cleaned.lower()
+                for term in ("moving from", "shift", "transition", "emerging", "future", "from", "to")
+            ):
+                trend_bonus = 4
             noise_penalty = 3 if {"reference", "format", "concepts", "copyright"}.intersection(sentence_terms) else 0
-            sentences.append((overlap + definition_bonus - noise_penalty, cleaned, f"[Source {index}]"))
+            sentences.append((overlap + definition_bonus + trend_bonus - noise_penalty, cleaned, f"[S{index}]"))
 
     ranked = sorted(sentences, key=lambda item: item[0], reverse=True)
     selected = [item for item in ranked if item[0] > 0][:4] or ranked[:3]
@@ -242,7 +377,162 @@ def generate_extract_answer(question: str, chunks: list[dict]) -> str:
     return "\n\n".join(answer_lines)
 
 
-def generate_extract_summary(chunks: list[dict]) -> str:
+def has_enough_evidence(question: str, chunks: list[dict]) -> bool:
+    if asks_current_date(question) or asks_for_summary(question) or asks_for_authors(question):
+        return True
+    if not chunks:
+        return False
+
+    question_terms = set(tokenize(question))
+    if not question_terms:
+        return False
+
+    best_score = max(float(chunk.get("score", 0.0)) for chunk in chunks)
+    best_overlap = 0.0
+    for chunk in chunks:
+        evidence_terms = set(tokenize(f"{chunk.get('filename', '')} {chunk.get('text', '')}"))
+        if not evidence_terms:
+            continue
+        overlap = len(question_terms.intersection(evidence_terms)) / len(question_terms)
+        best_overlap = max(best_overlap, overlap)
+
+    return best_overlap >= 0.25 or best_score >= 0.55
+
+
+def generate_author_answer(chunks: list[dict]) -> str:
+    for index, chunk in enumerate(chunks, start=1):
+        authors = extract_author_candidates(chunk["text"])
+        if authors:
+            return f"The paper lists {format_author_list(authors)} as the author(s). [S{index}]"
+    return "The uploaded papers do not provide enough title-page or citation information to identify the author(s)."
+
+
+def extract_author_candidates(text: str) -> list[str]:
+    front_matter = re.split(r"\bAbstract\b", text, maxsplit=1)[0]
+    front_matter = re.sub(r"\s+", " ", front_matter).strip()
+    if not front_matter:
+        return []
+
+    authors = extract_authors_near_emails(front_matter)
+    if authors:
+        return authors[:12]
+
+    affiliation_markers = (
+        "University",
+        "Institute",
+        "College",
+        "School",
+        "Department",
+        "Faculty",
+        "Laboratory",
+        "Centre",
+        "Center",
+    )
+    marker_pattern = "|".join(affiliation_markers)
+    pattern = rf"\b([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){{0,3}})\s+(?:{marker_pattern})\b"
+
+    authors: list[str] = []
+    for match in re.finditer(pattern, front_matter):
+        candidate = clean_author_name(match.group(1))
+        if not candidate:
+            continue
+        if candidate.lower() in {
+            "artificial intelligence",
+            "large language model",
+            "university",
+            "institute",
+            "college",
+            "school",
+            "department",
+            "faculty",
+            "laboratory",
+            "centre",
+            "center",
+        }:
+            continue
+        if candidate not in authors:
+            authors.append(candidate)
+    return authors[:12]
+
+
+def extract_authors_near_emails(front_matter: str) -> list[str]:
+    emails = list(re.finditer(r"[\w.+-]+@[\w.-]+\.\w+", front_matter))
+    if not emails:
+        return []
+
+    authors: list[str] = []
+    start = 0
+    for email in emails:
+        segment = front_matter[start : email.start()]
+        name = author_from_affiliation_segment(segment)
+        if name and name not in authors:
+            authors.append(name)
+        start = email.end()
+    return authors
+
+
+def author_from_affiliation_segment(segment: str) -> str:
+    affiliation_pattern = (
+        r"\b(?:University|Institute|College|School|Department|Faculty|Laboratory|Centre|Center|"
+        r"National Institute)\b"
+    )
+    match = re.search(affiliation_pattern, segment)
+    if not match:
+        return ""
+    before_affiliation = segment[: match.start()].strip()
+    words = before_affiliation.split()
+    if not words:
+        return ""
+
+    candidate_words: list[str] = []
+    for word in reversed(words):
+        stripped = re.sub(r"^[^A-Za-z]+|[^A-Za-z.]+$", "", word)
+        if not stripped:
+            continue
+        if stripped[:1].isupper() or re.fullmatch(r"[A-Z](?:\.[A-Z]\.)?", stripped):
+            candidate_words.append(stripped)
+            if len(candidate_words) == 4:
+                break
+            continue
+        break
+
+    candidate = " ".join(reversed(candidate_words))
+    return clean_author_name(candidate)
+
+
+def clean_author_name(name: str) -> str:
+    name = re.sub(r"^\W+|\W+$", "", name)
+    words = name.split()
+    while len(words) > 1 and words[0].lower() in {
+        "agentic",
+        "artificial",
+        "intelligence",
+        "architectures",
+        "taxonomies",
+        "evaluation",
+        "large",
+        "language",
+        "model",
+        "agents",
+    }:
+        words.pop(0)
+    cleaned = " ".join(words).strip()
+    if not cleaned or len(cleaned) < 3:
+        return ""
+    if len(cleaned.split()) > 4:
+        return ""
+    return cleaned
+
+
+def format_author_list(authors: list[str]) -> str:
+    if len(authors) == 1:
+        return authors[0]
+    if len(authors) == 2:
+        return f"{authors[0]} and {authors[1]}"
+    return ", ".join(authors[:-1]) + f", and {authors[-1]}"
+
+
+def generate_extract_summary(chunks: list[dict], focus: str | None = None) -> str:
     sentences: list[tuple[float, str, str]] = []
     for index, chunk in enumerate(chunks, start=1):
         page = int(chunk.get("page", 99))
@@ -290,7 +580,12 @@ def generate_extract_summary(chunks: list[dict]) -> str:
                 score += 1.0
             if "ccs concepts" in text_lower or "reference format" in text_lower:
                 score -= 3.0
-            sentences.append((score, cleaned, f"[Source {index}]"))
+            if focus:
+                focus_terms = set(tokenize(focus))
+                if focus_terms:
+                    sentence_terms = set(tokenize(cleaned))
+                    score += len(focus_terms.intersection(sentence_terms)) / len(focus_terms)
+            sentences.append((score, cleaned, f"[S{index}]"))
 
     selected: list[tuple[float, str, str]] = []
     seen = set()
@@ -307,7 +602,14 @@ def generate_extract_summary(chunks: list[dict]) -> str:
         return "The uploaded paper does not provide enough readable overview text to summarize it."
 
     bullets = [f"- {sentence} {source}" for _, sentence, source in selected]
-    return "Here is a brief overview of the paper:\n\n" + "\n".join(bullets)
+    heading = "Focused summary" if focus else "Research summary"
+    return f"{heading}:\n\n" + "\n".join(bullets)
+
+
+def normalize_source_labels(text: str) -> str:
+    text = re.sub(r"\[Source\s+(\d+)\]", r"[S\1]", text)
+    text = re.sub(r"\(Source\s+(\d+)\)", r"[S\1]", text)
+    return text
 
 
 def split_sentences(text: str) -> list[str]:
